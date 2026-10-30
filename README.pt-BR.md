@@ -1,5 +1,7 @@
 # Gravador de Legendas + OBS Studio
 
+**[Baixar versão Windows v1.0.0](https://github.com/fqsguitar/Gravador-Legendas-OBS/releases/tag/v1.0.0)** · [Histórico](CHANGELOG.md) · [Como contribuir](CONTRIBUTING.md) · [Segurança](SECURITY.md)
+
 [English](README.md) | **Português (Brasil)**
 
 Aplicativo para Windows que controla gravações do **OBS Studio** e gera automaticamente legendas **SRT com minutagem** e transcrições **TXT** a partir do vídeo final, usando **faster-whisper localmente**.
