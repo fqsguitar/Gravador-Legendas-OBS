@@ -1,5 +1,7 @@
 # OBS Subtitle Recorder / Gravador de Legendas OBS
 
+**[Download Windows v1.0.0](https://github.com/fqsguitar/Gravador-Legendas-OBS/releases/tag/v1.0.0)** · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+
 **English** | [Português (Brasil)](README.pt-BR.md)
 
 Windows desktop application that controls OBS Studio recording and automatically generates timestamped **SRT subtitles** and **TXT transcripts** from the finished OBS video using local **faster-whisper**.
