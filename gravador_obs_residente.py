@@ -6,6 +6,8 @@ from ctypes import wintypes
 import sys
 import time
 import wave
+import tempfile
+import shutil
 import queue
 import threading
 import traceback
@@ -83,7 +85,6 @@ class App:
         self.audio_start_time = None
         self.srt_offset = 0.0
         self.source = tk.StringVar(value='PC + Microfone')
-        self.mode = tk.StringVar(value='Após gravação')
         self.model = tk.StringVar(value='small')
         self.language = tk.StringVar(value='pt')
         self.output = tk.StringVar(value=str(Path.home() / 'Documents' / 'Legendas'))
@@ -101,7 +102,6 @@ class App:
         ttk.Label(p, text='Gravador de áudio e legendas', font=('Segoe UI', 17, 'bold')).pack(anchor='w')
         for label, var, options in [
             ('Fonte de áudio', self.source, ['Áudio do PC', 'Microfone', 'PC + Microfone']),
-            ('Transcrição', self.mode, ['Após gravação', 'Ao vivo']),
             ('Modelo Whisper', self.model, ['tiny', 'base', 'small', 'medium', 'large-v3']),
             ('Idioma', self.language, ['pt', 'en', 'auto'])
         ]:
@@ -136,7 +136,7 @@ class App:
         ttk.Label(settings, text='Senha').pack(side='left')
         ttk.Entry(settings, textvariable=self.obs_password, width=18, show='*').pack(side='left', padx=4)
         ttk.Checkbutton(p, text='Iniciar com o Windows (minimizado na bandeja)', variable=self.auto_start, command=self.toggle_autostart).pack(anchor='w', pady=6)
-        ttk.Label(p, text='Com OBS: transcrição após parar, diretamente do vídeo (sem captura extra).\nSem OBS: captura WAV local; transcrição ao vivo ou após gravação.', foreground='#555').pack(anchor='w')
+        ttk.Label(p, text='Com OBS: transcrição do vídeo finalizado.\nSem OBS: grava WAV temporário; transcreve após parar e apaga o WAV se der certo.', foreground='#555').pack(anchor='w')
         self.load_settings()
         self.auto_start.set(self.is_autostart_enabled())
         root.report_callback_exception = self._tk_exception
@@ -158,7 +158,7 @@ class App:
             return
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
-            fields = {'source': self.source, 'mode': self.mode, 'model': self.model,
+            fields = {'source': self.source, 'model': self.model,
                       'language': self.language, 'output': self.output, 'use_obs': self.use_obs,
                       'obs_host': self.obs_host, 'obs_port': self.obs_port}
             for key, var in fields.items():
@@ -175,7 +175,7 @@ class App:
 
     def save_settings(self):
         try:
-            data = {'source': self.source.get(), 'mode': self.mode.get(),
+            data = {'source': self.source.get(),
                     'model': self.model.get(), 'language': self.language.get(),
                     'output': self.output.get(), 'use_obs': self.use_obs.get(),
                     'obs_host': self.obs_host.get(), 'obs_port': self.obs_port.get(),
@@ -418,7 +418,6 @@ class App:
             return
         self.save_settings()
         self.capture_source = self.source.get()
-        self.capture_mode = self.mode.get()
         self.capture_model = self.model.get()
         self.capture_language = self.language.get()
         self.capture_output = self.output.get()
@@ -539,116 +538,210 @@ class App:
         return loopback, mic
 
     def capture(self):
+        """Grava fontes WASAPI em disco via callbacks; mistura após parar.
+
+        Não usa stream.read() bloqueante nem join() infinito. O callback
+        nunca acessa Tkinter, disco ou o modelo Whisper.
+        """
         pa = None
         streams = []
+        handles = {}
+        tracks = {}
+        capture_queue = queue.Queue(maxsize=512)
+        callback_errors = queue.Queue()
+        work_dir = None
+        callbacks_enabled = threading.Event()
+        callbacks_enabled.set()
         try:
             import pyaudiowpatch as pyaudio
+            folder = Path(self.capture_output)
+            folder.mkdir(parents=True, exist_ok=True)
+            work_dir = Path(tempfile.mkdtemp(prefix='.gravador_audio_', dir=str(folder)))
             pa = pyaudio.PyAudio()
             loopback, mic = self.find_devices(pa, self.capture_source)
-            devices = [('pc', loopback), ('mic', mic)]
-            chunks = {'pc': [], 'mic': []}
-            starts = {}
-            lock = threading.Lock()
-            errors = queue.Queue()
-            threads = []
-            active = [(name, device) for name, device in devices if device is not None]
+            active = [(name, device) for name, device in [('pc', loopback), ('mic', mic)] if device is not None]
+            if not active:
+                raise RuntimeError('Nenhum dispositivo de áudio disponível.')
+
             for name, device in active:
                 channels = int(device['maxInputChannels'])
-                if channels < 1:
-                    raise RuntimeError(f'Dispositivo {name} sem canais de entrada.')
-                # Usamos a taxa nativa do dispositivo para evitar falhas WASAPI.
                 rate = int(device['defaultSampleRate'])
+                if channels < 1 or rate < 1:
+                    raise RuntimeError(f'Dispositivo {name} inválido.')
+                raw_path = work_dir / f'{name}.pcm'
+                handles[name] = raw_path.open('wb')
+                tracks[name] = {'path': raw_path, 'channels': channels, 'rate': rate,
+                                'start': None, 'frames': 0, 'lost': 0}
+
+                def make_callback(source_name, sample_rate):
+                    def callback(in_data, frame_count, time_info, status_flags):
+                        if not callbacks_enabled.is_set():
+                            return (None, pyaudio.paComplete)
+                        try:
+                            # Marca o instante aproximado do primeiro sample do buffer.
+                            timestamp = time.monotonic() - frame_count / sample_rate
+                            capture_queue.put_nowait((source_name, timestamp, in_data, frame_count))
+                        except queue.Full:
+                            callback_errors.put(f'Fila de áudio cheia ({source_name}); captura interrompida para evitar perda silenciosa.')
+                            return (None, pyaudio.paComplete)
+                        except Exception:
+                            callback_errors.put(traceback.format_exc())
+                            return (None, pyaudio.paComplete)
+                        return (None, pyaudio.paContinue)
+                    return callback
+
                 stream = pa.open(format=pyaudio.paInt16, channels=channels, rate=rate,
                                  input=True, input_device_index=int(device['index']),
-                                 frames_per_buffer=CHUNK, start=False)
-                streams.append((name, stream, channels, rate))
+                                 frames_per_buffer=CHUNK, stream_callback=make_callback(name, rate),
+                                 start=False)
+                streams.append(stream)
+                self.log_event(f'Fonte {name}: {device.get("name", "dispositivo")} | {rate} Hz | {channels} canais')
 
-            def reader(name, stream, channels, rate):
-                try:
-                    with lock:
-                        starts[name] = time.monotonic()
-                    stream.start_stream()
-                    while self.running:
-                        raw = stream.read(CHUNK, exception_on_overflow=False)
-                        samples = np.frombuffer(raw, dtype='<i2').reshape(-1, channels).astype(np.float32).mean(axis=1) / 32768.0
-                        with lock:
-                            chunks[name].append(samples)
-                except Exception:
-                    errors.put((name, traceback.format_exc()))
-                    self.running = False
+            for stream in streams:
+                stream.start_stream()
+            self.set_status('Gravando áudio em disco...')
 
-            for name, stream, channels, rate in streams:
-                t = threading.Thread(target=reader, args=(name, stream, channels, rate), daemon=True)
-                t.start()
-                threads.append(t)
-            self.audio_start_time = min(starts.values()) if starts else time.monotonic()
-            if self.obs_start_time is not None:
-                self.srt_offset = max(0.0, self.audio_start_time - self.obs_start_time)
-            last_partial = time.monotonic()
+            def drain():
+                drained = 0
+                while True:
+                    try:
+                        name, timestamp, raw, frames = capture_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    info = tracks[name]
+                    if info['start'] is None:
+                        info['start'] = timestamp
+                    handles[name].write(raw)
+                    info['frames'] += frames
+                    drained += 1
+                return drained
+
             while self.running:
-                if not errors.empty():
-                    break
-                time.sleep(0.15)
-                if self.capture_mode == 'Ao vivo' and time.monotonic() - last_partial >= 15 and not self.partial_busy.is_set():
-                    last_partial = time.monotonic()
-                    audio = self.mix_snapshot(chunks, starts, streams, lock)
-                    if audio.size:
-                        path = self.write_wav(audio, partial=True)
-                        self.partial_busy.set()
-                        threading.Thread(target=self.partial_transcribe, args=(path,), daemon=True).start()
-            # Nunca fechar PortAudio enquanto uma thread ainda executa stream.read().
-            # O timeout antigo permitia fechar streams ativos e causava access violation.
-            for t in threads:
-                t.join(timeout=2)
-                if t.is_alive():
-                    self.log_event(f'Aguardando finalizacao segura da thread {t.name}')
-                    t.join()  # Bloqueia ate o reader sair; nao libera stream prematuramente.
-            # Guardar os metadados de cada fonte antes de liberar os streams.
-            # mix_snapshot precisa dos nomes e taxas para montar o WAV.
-            stream_metadata = [(name, None, channels, rate) for name, _, channels, rate in streams]
-            # A captura terminou: liberar o dispositivo ANTES de iniciar o Whisper.
-            for _, stream, _, _ in streams:
-                if stream.is_active():
+                drain()
+                if not callback_errors.empty():
+                    raise RuntimeError(callback_errors.get())
+                # Se uma fonte encerrou inesperadamente, não ficar preso esperando.
+                if any(stream.is_stopped() for stream in streams):
+                    raise RuntimeError('Um dispositivo de áudio parou inesperadamente. Confira o log e os dispositivos.')
+                time.sleep(0.025)
+
+            # Encerrar os callbacks antes de fechar os arquivos PCM.
+            callbacks_enabled.clear()
+            for stream in streams:
+                try:
                     stream.stop_stream()
-                stream.close()
+                except (OSError, IOError):
+                    pass
+            drain()
+            for handle in handles.values():
+                handle.flush()
+                handle.close()
+            handles.clear()
+            for stream in streams:
+                try:
+                    stream.close()
+                except (OSError, IOError):
+                    pass
             streams.clear()
             pa.terminate()
             pa = None
-            self.log_event('Threads de audio encerradas e PortAudio liberado')
-            if not errors.empty():
-                name, detail = errors.get()
-                raise RuntimeError(f'Falha ao ler {name}:\n{detail}')
-            audio = self.mix_snapshot(chunks, starts, stream_metadata, lock)
-            if not audio.size:
-                raise RuntimeError('Nenhum áudio capturado. Verifique os dispositivos de entrada/saída.')
-            path = self.write_wav(audio)
-            self.set_status('Áudio salvo. Gerando SRT e TXT...')
-            self.transcribe(path, False, self.capture_model, self.capture_language, self.srt_offset)
-        except Exception as e:
+            if not callback_errors.empty():
+                raise RuntimeError(callback_errors.get())
+            if not any(t['frames'] for t in tracks.values()):
+                raise RuntimeError('Nenhum áudio capturado. Verifique os dispositivos.')
+
+            self.set_status('Montando áudio final sincronizado...')
+            wav_path = str(folder / (self.name + '.wav'))
+            self.mix_pcm_files(tracks, wav_path)
+            self.log_event(f'WAV finalizado: {wav_path}')
+            self.set_status('Áudio finalizado. Gerando SRT e TXT...')
+            # Só exclui WAV quando a transcrição efetivamente deu certo.
+            success = self.transcribe(wav_path, False, self.capture_model,
+                                      self.capture_language, 0)
+            if success:
+                try:
+                    Path(wav_path).unlink()
+                    self.log_event('WAV temporário excluído após gerar SRT e TXT')
+                    self.set_status(f'Concluído! SRT e TXT em: {folder} (WAV temporário removido)')
+                except OSError as exc:
+                    self.log_event(f'Não foi possível excluir WAV: {exc}')
+                    self.set_status(f'SRT/TXT concluídos; WAV mantido: {exc}')
+            else:
+                self.set_status(f'Transcrição falhou; WAV preservado para recuperação: {wav_path}')
+        except Exception as exc:
             self.log_error()
-            self.set_status(f'Erro: {e}. Consulte gravador_erros.log na pasta de saída.')
+            self.set_status(f'Erro: {exc}. Consulte gravador_erros.log na pasta de saída.')
         finally:
             self.running = False
-            # Protecao: em erro, nunca liberar stream se algum reader ainda o utiliza.
-            if streams:
-                alive = [t for t in locals().get('threads', []) if t.is_alive()]
-                if alive:
-                    self.log_event('ERRO: reader ainda ativo; recursos mantidos para evitar crash nativo')
-                else:
-                    for _, stream, _, _ in streams:
-                        try:
-                            if stream.is_active():
-                                stream.stop_stream()
-                            stream.close()
-                        except Exception:
-                            pass
-                    if pa is not None:
-                        pa.terminate()
-            elif pa is not None:
-                pa.terminate()
-            if self.obs_started:
-                self.stop_obs()
+            callbacks_enabled.clear()
+            # Nenhuma thread Python faz leitura bloqueante de stream.read().
+            for stream in streams:
+                try:
+                    stream.stop_stream()
+                except Exception:
+                    pass
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            for handle in handles.values():
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            if pa is not None:
+                try:
+                    pa.terminate()
+                except Exception:
+                    self.log_runtime_error('Falha ao liberar PortAudio')
+            if work_dir is not None:
+                try:
+                    shutil.rmtree(work_dir)
+                except OSError:
+                    self.log_event(f'Arquivos PCM temporários mantidos: {work_dir}')
             self.ui(self._finish_capture)
+
+    @staticmethod
+    def mix_pcm_files(tracks, wav_path):
+        """Mistura PCM de fontes independentes em blocos; uso limitado de RAM.
+
+        Cada fonte é posicionada pelo início do primeiro buffer. Preserva
+        silêncio entre o início das fontes e reamostra para 16 kHz.
+        """
+        valid = [info for info in tracks.values() if info['frames'] and info['start'] is not None]
+        if not valid:
+            raise RuntimeError('Não há amostras para montar o WAV.')
+        t0 = min(info['start'] for info in valid)
+        for info in valid:
+            info['offset'] = max(0, round((info['start'] - t0) * RATE))
+            info['length'] = round(info['frames'] * RATE / info['rate'])
+        total = max(info['offset'] + info['length'] for info in valid)
+        gain = 0.7 if len(valid) > 1 else 1.0
+        block_size = RATE * 5
+        with wave.open(str(wav_path), 'wb') as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(RATE)
+            for begin in range(0, total, block_size):
+                end = min(total, begin + block_size)
+                mixed = np.zeros(end - begin, dtype=np.float32)
+                for info in valid:
+                    lo = max(begin, info['offset'])
+                    hi = min(end, info['offset'] + info['length'])
+                    if lo >= hi:
+                        continue
+                    rate = info['rate']
+                    src_pos = (np.arange(lo, hi, dtype=np.float64) - info['offset']) * rate / RATE
+                    src_lo = max(0, int(np.floor(src_pos[0])))
+                    src_hi = min(info['frames'], int(np.ceil(src_pos[-1])) + 2)
+                    with info['path'].open('rb') as source:
+                        source.seek(src_lo * info['channels'] * 2)
+                        raw = source.read((src_hi - src_lo) * info['channels'] * 2)
+                    samples = np.frombuffer(raw, dtype='<i2').reshape(-1, info['channels'])
+                    mono = samples.astype(np.float32).mean(axis=1) / 32768.0
+                    resampled = np.interp(src_pos, np.arange(src_lo, src_lo + len(mono)), mono)
+                    mixed[lo - begin:hi - begin] += (gain * resampled).astype(np.float32)
+                out.writeframes(np.round(np.clip(mixed, -1, 1) * 32767).astype('<i2').tobytes())
 
     def _finish_capture(self):
         if self.exiting:
@@ -747,13 +840,17 @@ class App:
             self.set_status('Salvando SRT e TXT...') if not partial else None
             base.with_suffix('.srt').write_text('\n'.join(srt), encoding='utf-8-sig')
             base.with_suffix('.txt').write_text('\n'.join(txt), encoding='utf-8-sig')
+            if not (base.with_suffix('.srt').is_file() and base.with_suffix('.txt').is_file()):
+                raise RuntimeError('Falha ao confirmar os arquivos SRT e TXT.')
             if not partial:
                 self.set_status(f'Concluído! SRT e TXT em: {base.parent}')
             else:
                 self.set_status('Legenda parcial atualizada (a gravação continua).')
+            return True
         except Exception:
             self.log_error()
             self.set_status('Erro na transcrição. Consulte gravador_erros.log.')
+            return False
 
     def import_file(self):
         if self.worker is not None and self.worker.is_alive():
