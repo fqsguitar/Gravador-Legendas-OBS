@@ -6,7 +6,7 @@
 
 Aplicativo para Windows que controla gravações do **OBS Studio** e gera automaticamente legendas **SRT com minutagem** e transcrições **TXT** a partir do vídeo final, usando **faster-whisper localmente**.
 
-> **O OBS Studio NÃO acompanha este projeto. É obrigatório instalar e configurar o OBS separadamente em https://obsproject.com/. O OBS precisa estar aberto para gravar vídeo.**
+> **O OBS Studio NÃO acompanha este projeto. Para gravar vídeo, instale e configure o OBS separadamente em https://obsproject.com/ e deixe-o aberto. Para gravar somente áudio, o OBS não é necessário.**
 
 ## Recursos
 - Inicia e para o OBS via WebSocket, pela janela ou bandeja do Windows.
@@ -16,12 +16,13 @@ Aplicativo para Windows que controla gravações do **OBS Studio** e gera automa
 - Permanece aberto após a transcrição, zera o cronômetro e permite novas gravações.
 - Configurações persistentes e senha WebSocket protegida com DPAPI do Windows.
 - Inicialização automática opcional com o Windows.
-- Modo somente áudio independente **experimental**.
+- Gravação independente de áudio do PC, microfone ou ambos, em arquivos temporários no disco.
+- Transcrição sempre após parar; WAV temporário apagado somente após gerar SRT e TXT com sucesso e preservado em caso de falha.
 
 ## Requisitos
-Windows 10/11, OBS Studio 28 ou superior instalado à parte, Python com comando `py` para compilar e internet inicialmente para baixar dependências/modelo Whisper. Respeite as autorizações e políticas de gravação.
+Windows 10/11, OBS Studio 28 ou superior somente para gravar vídeo, Python com comando `py` para compilar e internet inicialmente para baixar dependências/modelo Whisper. Respeite as autorizações e políticas de gravação.
 
-## 1. Instalação e configuração do OBS
+## 1. Instalação e configuração do OBS (somente para vídeo)
 1. Baixe o OBS em **https://obsproject.com/** e instale. O `compilar_obs.bat` **não instala o OBS**.
 2. Abra o OBS, crie uma cena e configure a captura da tela ou janela.
 3. Em **Configurações → Áudio**, configure **Áudio do desktop** e **Microfone/áudio auxiliar** conforme necessário. Confira os medidores no mixer.
@@ -43,7 +44,7 @@ Não exponha a porta WebSocket à internet; para programas no mesmo PC, use `loc
 ## 3. Gravar e gerar legendas
 Marque **Gravar vídeo no OBS**, configure **Host** `localhost`, **Porta** `4455` e a senha do WebSocket. Selecione modelo Whisper **small** e idioma desejado.
 
-Clique em **Iniciar gravação** na janela ou na bandeja. O OBS grava o vídeo e as fontes de áudio configuradas nele. Clique em **Parar e salvar** e aguarde a transcrição. No modo OBS, a transcrição é **após a gravação**, mesmo que a interface indique Ao vivo.
+Clique em **Iniciar gravação** na janela ou na bandeja. O OBS grava o vídeo e as fontes de áudio configuradas nele. Clique em **Parar e salvar** e aguarde a transcrição. No modo OBS, a transcrição acontece **após a gravação**.
 
 ```text
 2026-10-28 16-40-53.mp4
@@ -62,8 +63,8 @@ Ao clicar no X, a janela é ocultada, mas o aplicativo continua na bandeja. Cliq
 
 **Marcar a caixa do gravador NÃO inicia o OBS automaticamente.** O OBS precisa estar aberto quando você solicitar uma gravação de vídeo.
 
-## 6. Somente áudio — experimental
-Desmarcando **Gravar vídeo no OBS**, o programa usa captura local PyAudioWPatch/WASAPI e tenta gerar WAV/SRT/TXT. Esse modo apresentou travamentos na finalização e falhas de captura nos testes. **Não use em reuniões importantes até ser corrigido.**
+## 6. Somente áudio — sem OBS
+Desmarque **Gravar vídeo no OBS**, selecione **Áudio do PC**, **Microfone** ou **PC + Microfone** e inicie a gravação. O aplicativo captura continuamente em arquivos temporários, mistura as fontes após parar e gera SRT/TXT. Depois que ambos forem gerados, apaga o WAV temporário. Se a transcrição falhar, preserva o WAV. O modo foi testado manualmente; confira os dispositivos padrão de áudio do Windows antes de gravações importantes.
 
 ## 7. Problemas comuns
 - **OBS não conecta:** confira se está aberto, WebSocket habilitado, host, porta e senha.
@@ -75,4 +76,4 @@ Desmarcando **Gravar vídeo no OBS**, o programa usa captura local PyAudioWPatch
 ## Privacidade e estado
 A transcrição roda localmente após baixar o modelo. A senha WebSocket é protegida por DPAPI. Não publique `config.json`, logs, gravações ou transcrições privadas.
 
-**Modo OBS:** validado com gravações consecutivas e retorno à bandeja. **Modo somente áudio:** experimental. Projeto independente, sem afiliação ao OBS Studio. Licença MIT.
+**Modo OBS:** validado com gravações consecutivas e retorno à bandeja. **Modo somente áudio:** testado manualmente após a reformulação da captura; outros dispositivos podem exigir validação. Projeto independente, sem afiliação ao OBS Studio. Licença MIT.
