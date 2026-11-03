@@ -6,7 +6,7 @@
 
 Windows desktop application that controls OBS Studio recording and automatically generates timestamped **SRT subtitles** and **TXT transcripts** from the finished OBS video using local **faster-whisper**.
 
-> **OBS Studio is NOT included. Install and configure OBS separately from https://obsproject.com/. OBS must be running when you start recording.** This project is not affiliated with OBS Studio.
+> **OBS Studio is NOT included. For video mode, install and configure OBS separately from https://obsproject.com/ and keep it running. Standalone audio mode does not require OBS.** This project is not affiliated with OBS Studio.
 
 ## Features
 - Start/stop OBS recording from the application or Windows system tray via OBS WebSocket.
@@ -16,16 +16,17 @@ Windows desktop application that controls OBS Studio recording and automatically
 - Remain resident after transcription, reset timer and support repeated recordings.
 - Optional auto-start minimized to tray on Windows sign-in.
 - Remember preferences; protect the OBS WebSocket password using Windows DPAPI.
-- Experimental standalone audio recording mode (not yet reliable).
+- Standalone PC audio, microphone, or PC + microphone capture to temporary disk files.
+- Transcription always runs after recording ends; temporary WAV is deleted only after SRT/TXT are generated successfully, and retained on failure.
 
 ## Requirements
 - Windows 10/11.
-- **OBS Studio 28+**, installed separately; WebSocket support is built in.
+- **OBS Studio 28+** for video mode only; WebSocket support is built in.
 - Python and the `py` launcher for building the EXE.
 - Internet access for initial Python dependencies and Whisper model download; transcription runs locally afterward.
 - Permission to record the content and participants concerned.
 
-## 1. Install OBS Studio (required)
+## 1. Install OBS Studio (for video mode only)
 1. Download and install **OBS Studio** from https://obsproject.com/. The build script **does not** install OBS.
 2. Open OBS and create a scene with the desired screen/window capture.
 3. Under **Settings → Audio**, set up **Desktop Audio** and **Mic/Auxiliary Audio** as needed. Check that the OBS audio mixer meters move for both the PC and microphone.
@@ -48,7 +49,7 @@ The batch file **does not install OBS**, create an installer, or enable Windows 
 ## 3. Connect and record
 In the app, enable **Gravar vídeo no OBS**, set **Host** to `localhost`, **Port** to `4455`, and enter the same WebSocket password as in OBS. Start with Whisper model **small** and the desired language.
 
-Click **Iniciar gravação** (Start recording), or use the system tray menu. OBS records the video and all audio configured in its mixer. Click **Parar e salvar** (Stop and save) to finish. The application transcribes the saved OBS video after recording ends, even when its UI is set to live transcription.
+Click **Iniciar gravação** (Start recording), or use the system tray menu. OBS records the video and all audio configured in its mixer. Click **Parar e salvar** (Stop and save) to finish. The application transcribes the saved OBS video after recording ends.
 
 Example output:
 ```text
@@ -68,8 +69,8 @@ Close the window with **X** to keep the app running in the tray. Right-click the
 
 **Important:** ticking the box in the Subtitle Recorder **does not start or install OBS**. Both applications must be running for video recording.
 
-## 6. Standalone audio mode — experimental
-Unticking **Gravar vídeo no OBS** uses independent PyAudioWPatch/WASAPI capture to produce WAV/SRT/TXT. This mode has shown long shutdown delays and missing audio during testing. **Do not rely on it for important recordings yet.** OBS video mode is the validated path.
+## 6. Standalone audio mode — without OBS
+Untick **Gravar vídeo no OBS**, select **Áudio do PC**, **Microfone**, or **PC + Microfone**, and start recording. The application captures continuously to temporary files, mixes the audio sources after stopping, and then generates SRT/TXT. Once both files are generated, the WAV is deleted. If transcription fails, the WAV is preserved. The mode was manually tested; verify your Windows default input/output devices before important recordings.
 
 ## 7. Troubleshooting
 - **Connection failed:** verify OBS is open, WebSocket enabled, `localhost`, port and password.
@@ -81,6 +82,6 @@ Unticking **Gravar vídeo no OBS** uses independent PyAudioWPatch/WASAPI capture
 ## Privacy and status
 Speech recognition runs locally after model download. OBS WebSocket credentials are protected with Windows DPAPI in the current user's settings; **never commit** local `config.json`, meeting recordings, transcripts or logs.
 
-**OBS mode:** tested with consecutive recordings, successful SRT/TXT output and return to idle tray state. **Standalone audio mode:** experimental.
+**OBS mode:** tested with consecutive recordings, successful SRT/TXT output and return to idle tray state. **Standalone audio mode:** manually tested after capture redesign; behavior may vary with Windows audio devices.
 
 License: MIT.
